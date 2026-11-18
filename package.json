@@ -1,0 +1,22 @@
+{
+  "name": "btc-block-audit",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Checks Bitcoin blocks from their raw bytes: proof of work, merkle root, witness commitment, weight, BIP34 height, median time past and the header chain",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "btc-block-audit": "src/main.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc",
+    "test": "node --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^7.0.2"
+  }
+}
