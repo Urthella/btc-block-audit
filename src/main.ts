@@ -5,10 +5,10 @@
 
 import { parseArgs } from "node:util";
 
-import { audit, collect, describe, exitCode } from "./audit.ts";
+import { audit, collect, collectRetargets, describe, exitCode, retargets } from "./audit.ts";
 import { Esplora } from "./esplora.ts";
 
-const USAGE = "usage: btc-block-audit [--api URL] [--blocks N] [--to HEIGHT] [--json]";
+const USAGE = "usage: btc-block-audit [--api URL] [--blocks N] [--to HEIGHT] [--retarget N] [--json]";
 
 async function main(): Promise<number> {
   let values;
@@ -18,6 +18,7 @@ async function main(): Promise<number> {
         api: { type: "string", default: "https://mempool.space/api" },
         blocks: { type: "string", default: "3" },
         to: { type: "string" },
+        retarget: { type: "string", default: "0" },
         json: { type: "boolean" },
         help: { type: "boolean", short: "h" },
       },
@@ -28,6 +29,7 @@ async function main(): Promise<number> {
   }
   const blocks = Number(values.blocks);
   const to = values.to === undefined ? undefined : Number(values.to);
+  const retarget = Number(values.retarget);
   if (values.help) {
     console.error(USAGE);
     return 0;
@@ -40,8 +42,15 @@ async function main(): Promise<number> {
     console.error(`--to must be a block height: ${values.to}\n${USAGE}`);
     return 2;
   }
+  if (!Number.isInteger(retarget) || retarget < 0 || retarget > 50) {
+    console.error(`--retarget must be 0 to 50: ${values.retarget}\n${USAGE}`);
+    return 2;
+  }
   try {
-    const report = audit(await collect(new Esplora(values.api), blocks, to));
+    const api = new Esplora(values.api);
+    const collected = await collect(api, blocks, to);
+    const report = audit(collected);
+    if (retarget) report.adjustments = retargets(await collectRetargets(api, retarget, collected.last), retarget, collected.last);
     console.log(values.json ? JSON.stringify(report, null, 2) : describe(report));
     return exitCode(report);
   } catch (error) {

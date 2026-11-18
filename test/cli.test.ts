@@ -21,6 +21,7 @@ for (const name of ["recent", "old", "genesis"]) {
   for (const b of f.blocks as BlockInfo[]) infos.set(b.height, b);
   for (const [h, b64] of Object.entries(f.raw as Record<string, string>)) raws.set(infos.get(Number(h))!.id, Buffer.from(b64, "base64"));
 }
+for (const b of JSON.parse(gunzipSync(readFileSync(new URL("fixtures/retargets.json.gz", import.meta.url))).toString()) as BlockInfo[]) infos.set(b.height, b);
 const TIP = 976_387;
 
 let rateLimits = 0;
@@ -72,7 +73,16 @@ test("--to audits older blocks, and says which rules don't apply to them", async
   const { code, stdout, stderr } = await run("--to", "100800", "--blocks", "2");
   assert.equal(code, 0, stderr);
   assert.match(stdout, /check: the coinbase starts with the block's height \(BIP34\): 0 of 0 \(2 not subject to it\)/);
-  assert.match(stdout, /block 100,800 starts a retarget period, so its new bits aren't checked/);
+  assert.match(stdout, /block 100,800 starts a retarget period, so its new bits aren't checked here; --retarget checks them/);
+});
+
+test("--retarget checks the last difficulty adjustments", async () => {
+  const { code, stdout, stderr } = await run("--blocks", "2", "--retarget", "3");
+  assert.equal(code, 0, stderr);
+  const lines = stdout.split("\n").filter((l) => l.includes("retarget at block"));
+  assert.deepEqual(lines.map((l) => l.match(/block ([\d,]+)/)![1]), ["975,744", "973,728", "971,712"]);
+  for (const l of lines) assert.match(l, /the period before took \d+ days \d+ hours, against two weeks, so difficulty (rose|fell) \d+\.\d\d%: bits [0-9a-f]{8}, as the formula gives$/);
+  assert.match(lines[0], /difficulty fell .*bits 17021673/);
 });
 
 test("--json prints the report", async () => {
@@ -114,7 +124,7 @@ test("another chain's API exits 2: this checks mainnet's rules", async () => {
 });
 
 test("bad arguments and an unreachable API exit 2", async () => {
-  for (const args of [["--blocks", "0"], ["--blocks", "101"], ["--blocks", "some"], ["--to", "-1"], ["--to", "tip"]]) {
+  for (const args of [["--blocks", "0"], ["--blocks", "101"], ["--blocks", "some"], ["--to", "-1"], ["--to", "tip"], ["--retarget", "51"], ["--retarget", "1.5"]]) {
     const bad = await run(...args);
     assert.equal(bad.code, 2, `${args}: ${bad.stderr}`);
     assert.match(bad.stderr, /usage: btc-block-audit/);

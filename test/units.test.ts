@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { gunzipSync } from "node:zlib";
 
-import { GENESIS, POW_LIMIT, display, hashValue, heightPush, merkleRoot, parseBlock, sha256d, subsidy, target } from "../src/bitcoin.ts";
+import { GENESIS, POW_LIMIT, TARGET_TIMESPAN, compact, display, hashValue, heightPush, merkleRoot, nextBits, parseBlock, sha256d, subsidy, target } from "../src/bitcoin.ts";
 
 const genesis = Buffer.from(JSON.parse(gunzipSync(readFileSync(new URL("fixtures/genesis.json.gz", import.meta.url))).toString()).raw["0"], "base64");
 
@@ -25,6 +25,27 @@ test("compact bits decode to targets", () => {
   assert.equal(target(0x02123456), 0x1234n, "a small exponent shifts the mantissa right");
   assert.equal(target(0x1d80ffff), 0n, "the sign bit makes a negative target, which no block can meet");
 });
+
+test("targets encode back to compact bits as Bitcoin Core does", () => {
+  for (const bits of [0x1d00ffff, 0x17021673, 0x1b0404cb, 0x1d00d86a]) assert.equal(compact(target(bits)), bits, bits.toString(16));
+  assert.equal(compact(0x80n), 0x02008000, "a mantissa's top bit set moves a byte into the size");
+  assert.equal(compact(0x7fn), 0x017f0000);
+  assert.equal(compact(0x123456789n), 0x05012345, "low bytes are dropped");
+  assert.equal(compact(0n), 0);
+});
+
+test("the next target scales by the period's timespan, clamped, no easier than the limit", () => {
+  const start = 1_000_000;
+  const bits = 0x17021673;
+  assert.equal(nextBits(bits, start, start + TARGET_TIMESPAN), bits, "exactly two weeks: unchanged");
+  assert.equal(target(nextBits(bits, start, start + 2 * TARGET_TIMESPAN)), compactTarget(target(bits) * 2n), "twice as long: twice the target");
+  assert.equal(nextBits(bits, start, start + 10 * TARGET_TIMESPAN), nextBits(bits, start, start + 4 * TARGET_TIMESPAN), "no more than four times easier");
+  assert.equal(nextBits(bits, start, start + TARGET_TIMESPAN / 10), nextBits(bits, start, start + TARGET_TIMESPAN / 4), "no more than four times harder");
+  assert.equal(nextBits(0x1d00ffff, start, start + 2 * TARGET_TIMESPAN), 0x1d00ffff, "capped at mainnet's easiest target");
+});
+
+/** A target as compact bits would round it. */
+const compactTarget = (t: bigint) => target(compact(t));
 
 test("an odd merkle level pairs its last hash with itself", () => {
   const [a, b, c] = ["a", "b", "c"].map((s) => sha256d(Buffer.from(s)));
