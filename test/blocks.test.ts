@@ -5,8 +5,9 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { gunzipSync } from "node:zlib";
 
-import { type Check, type Collected, audit } from "../src/audit.ts";
-import { parseBlock } from "../src/bitcoin.ts";
+import { type Check, type Collected, audit, describe, exitCode, headerBytes, retargets } from "../src/audit.ts";
+import { POW_LIMIT, TARGET_TIMESPAN, display, parseBlock, sha256d } from "../src/bitcoin.ts";
+import type { BlockInfo } from "../src/esplora.ts";
 
 function load(name: string): Collected {
   const f = JSON.parse(gunzipSync(readFileSync(new URL(`fixtures/${name}.json.gz`, import.meta.url))).toString());
@@ -146,6 +147,51 @@ test("bits that change inside a retarget period fail", () => {
     raw.writeUInt32LE(raw.readUInt32LE(72) + 1, 72);
   });
   assert.ok(failed(c).includes("976387 bits"));
+});
+
+const retargetHeaders: BlockInfo[] = JSON.parse(gunzipSync(readFileSync(new URL("fixtures/retargets.json.gz", import.meta.url))).toString());
+
+test("the last three difficulty adjustments follow the formula", () => {
+  const adjustments = retargets(retargetHeaders, 3, 976_387);
+  assert.deepEqual(adjustments.map((a) => a.height), [975_744, 973_728, 971_712]);
+  for (const a of adjustments) assert.equal(a.bits, a.expected, String(a.height));
+  assert.ok(adjustments[0].timespan > TARGET_TIMESPAN, "975,744's period ran long, so its difficulty fell");
+  assert.equal(adjustments[0].bits, 0x17021673);
+});
+
+test("the first adjustment was capped at mainnet's easiest target, and 32,256 first raised the difficulty", () => {
+  const [first] = retargets(retargetHeaders, 1, 2_016);
+  assert.equal(first.bits, 0x1d00ffff);
+  assert.equal(first.expected, 0x1d00ffff);
+  assert.ok((POW_LIMIT * BigInt(first.timespan)) / BigInt(TARGET_TIMESPAN) > POW_LIMIT, "2009's first period took over two weeks, so the formula alone would go easier");
+  const report = audit(load("genesis"));
+  report.adjustments = [first];
+  assert.match(describe(report), /retarget at block 2,016: the period before took 23 days 18 hours, against two weeks, so difficulty stayed at mainnet's minimum: bits 1d00ffff, as the formula gives/);
+  const [rise] = retargets(retargetHeaders, 1, 32_256);
+  assert.equal(rise.oldBits, 0x1d00ffff);
+  assert.equal(rise.bits, rise.expected);
+  assert.notEqual(rise.bits, 0x1d00ffff);
+});
+
+test("headers --retarget can't trust stop it", () => {
+  const swap = (height: number, info: BlockInfo) => retargetHeaders.map((b) => (b.height === height ? { ...info, height } : b));
+  const byHeight = new Map(retargetHeaders.map((b) => [b.height, b]));
+  // The old period's first block, given a later time and an ID that matches: no proof of work.
+  const forged = { ...byHeight.get(973_728)!, timestamp: byHeight.get(973_728)!.timestamp + 3_600 };
+  forged.id = display(sha256d(headerBytes(forged)));
+  assert.throws(() => retargets(swap(973_728, forged), 1, 976_387), /block 973728 don't hash to its ID or don't meet its target/);
+  // A real header, but from another period.
+  assert.throws(() => retargets(swap(973_728, byHeight.get(971_712)!), 1, 976_387), /blocks 973728 and 975743 don't share their period's bits/);
+  // A real header from the right period, but not the block the new one builds on.
+  assert.throws(() => retargets(swap(975_743, byHeight.get(975_742)!), 1, 976_387), /block 975744 doesn't build on block 975743/);
+});
+
+test("an adjustment the formula disagrees with exits 1", () => {
+  const report = audit(load("genesis"));
+  assert.equal(exitCode(report), 0);
+  report.adjustments = [{ height: 2016, timespan: TARGET_TIMESPAN, oldBits: 0x1d00ffff, bits: 0x1d00fffe, expected: 0x1d00ffff }];
+  assert.equal(exitCode(report), 1);
+  assert.match(describe(report), /retarget at block 2,016: .*: bits 1d00fffe, but the formula gives 1d00ffff/);
 });
 
 test("API header fields that don't hash to their ID, and bytes that don't parse, can't be audited", () => {

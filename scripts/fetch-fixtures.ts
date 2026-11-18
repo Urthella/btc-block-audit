@@ -5,7 +5,7 @@
 import { writeFileSync } from "node:fs";
 import { gzipSync } from "node:zlib";
 
-import { collect } from "../src/audit.ts";
+import { collect, collectRetargets } from "../src/audit.ts";
 import { Esplora } from "../src/esplora.ts";
 
 const api = new Esplora("https://mempool.space/api");
@@ -18,3 +18,10 @@ for (const [name, { to, count }] of Object.entries(ranges)) {
   writeFileSync(file, gzipSync(JSON.stringify(fixture), { level: 9 }));
   console.log(`${name}: blocks ${first} to ${last}, ${blocks.length} headers`);
 }
+
+// For --retarget: the headers around the last three adjustments before block 976,387, the first
+// one (capped at mainnet's easiest target) and the first that raised the difficulty.
+const headers = new Map<number, unknown>();
+for (const [count, last] of [[3, 976_387], [1, 2_016], [1, 32_256]]) for (const b of await collectRetargets(api, count, last)) headers.set(b.height, b);
+writeFileSync(new URL("../test/fixtures/retargets.json.gz", import.meta.url), gzipSync(JSON.stringify([...headers.values()]), { level: 9 }));
+console.log(`retargets: ${headers.size} headers`);

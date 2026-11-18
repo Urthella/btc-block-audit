@@ -41,6 +41,33 @@ export function target(bits: number): bigint {
   return exponent <= 3 ? mantissa >> BigInt(8 * (3 - exponent)) : mantissa << BigInt(8 * (exponent - 3));
 }
 
+/** The compact bits Bitcoin Core's GetCompact gives a target: three bytes of mantissa, one of size. */
+export function compact(t: bigint): number {
+  let size = t === 0n ? 0 : Math.ceil(t.toString(2).length / 8);
+  let mantissa = Number(size <= 3 ? t << BigInt(8 * (3 - size)) : t >> BigInt(8 * (size - 3)));
+  // A mantissa with its top bit set would read as negative: move a byte into the size.
+  if (mantissa & 0x00800000) {
+    mantissa >>= 8;
+    size++;
+  }
+  return ((size << 24) | mantissa) >>> 0;
+}
+
+/** Two weeks: what a retarget period of 2,016 blocks should take. */
+export const TARGET_TIMESPAN = 14 * 24 * 60 * 60;
+
+/**
+ * Bitcoin Core's CalculateNextWorkRequired. The timespan runs from the period's first block's time
+ * to its last's, 2,015 intervals rather than 2,016, and is clamped to between a quarter and four
+ * times two weeks; the new target scales the last one by it, no easier than mainnet's limit.
+ */
+export function nextBits(lastBits: number, firstTime: number, lastTime: number): number {
+  const timespan = Math.min(Math.max(lastTime - firstTime, TARGET_TIMESPAN / 4), TARGET_TIMESPAN * 4);
+  let next = (target(lastBits) * BigInt(timespan)) / BigInt(TARGET_TIMESPAN);
+  if (next > POW_LIMIT) next = POW_LIMIT;
+  return compact(next);
+}
+
 /** A block hash as the number proof of work compares with the target. */
 export const hashValue = (hash: Uint8Array) => BigInt(`0x${display(hash)}`);
 

@@ -2,7 +2,7 @@
 // from the API's block list: each is rebuilt from its fields and must hash to its ID and link to
 // the next, so the first audited block's own header vouches for them, timestamps included.
 
-import { BIP34_HEIGHT, GENESIS, MAX_WEIGHT, POW_LIMIT, display, expectedCommitment, hashValue, heightPush, internal, isCoinbase, merkleRoot, parseBlock, parseHeader, subsidy, target, witnessCommitment } from "./bitcoin.ts";
+import { BIP34_HEIGHT, GENESIS, MAX_WEIGHT, POW_LIMIT, display, expectedCommitment, hashValue, heightPush, internal, isCoinbase, merkleRoot, nextBits, parseBlock, parseHeader, subsidy, target, witnessCommitment } from "./bitcoin.ts";
 import type { BlockInfo, Esplora } from "./esplora.ts";
 
 /** Median time past looks at the 11 blocks before. */
@@ -77,13 +77,67 @@ export interface Report {
   /** The newest block's subsidy, and what the coinbases claimed beyond theirs. */
   subsidy: string;
   medianFees: string;
+  /** Difficulty adjustments checked with `--retarget`. */
+  adjustments: Adjustment[];
+}
+
+export interface Adjustment {
+  /** The first block of the new period. */
+  height: number;
+  /** From the old period's first block's time to its last's, before clamping. */
+  timespan: number;
+  oldBits: number;
+  bits: number;
+  /** What the formula gives. */
+  expected: number;
+}
+
+/** The latest retarget heights at or below `last`, newest first, back to block 2,016. */
+function retargetHeights(count: number, last: number): number[] {
+  const out: number[] = [];
+  for (let h = Math.floor(last / RETARGET_INTERVAL) * RETARGET_INTERVAL; h >= RETARGET_INTERVAL && out.length < count; h -= RETARGET_INTERVAL) out.push(h);
+  return out;
+}
+
+/** The headers `--retarget` needs: each period's first block, and the last block of the period before. */
+export async function collectRetargets(api: Esplora, count: number, last: number): Promise<BlockInfo[]> {
+  const pages = new Set<number>();
+  for (const h of retargetHeights(count, last)) pages.add(h).add(h - RETARGET_INTERVAL);
+  const out = new Map<number, BlockInfo>();
+  // A page lists the block asked for and the nine before it, so the one at a retarget height has
+  // the old period's last block too.
+  for (const p of pages) for (const b of await api.json<BlockInfo[]>(`/blocks/${p}`)) out.set(b.height, b);
+  return [...out.values()];
+}
+
+/**
+ * Checks each adjustment's new bits against the formula, from the old period's first and last
+ * headers. Every header used must hash to its ID and meet its own target, the new period's first
+ * must build on the old one's last, and the old period's first and last must share their bits.
+ */
+export function retargets(infos: BlockInfo[], count: number, last: number): Adjustment[] {
+  const byHeight = new Map(infos.map((b) => [b.height, b]));
+  const header = (h: number) => {
+    const info = byHeight.get(h);
+    if (!info) throw new Error(`the API listed no block ${h}`);
+    const header = parseHeader(headerBytes(info));
+    const t = target(header.bits);
+    if (display(header.hash) !== info.id || t === 0n || t > POW_LIMIT || hashValue(header.hash) > t) throw new Error(`the API's fields for block ${h} don't hash to its ID or don't meet its target`);
+    return header;
+  };
+  return retargetHeights(count, last).map((height) => {
+    const [first, end, start] = [header(height - RETARGET_INTERVAL), header(height - 1), header(height)];
+    if (!start.prev.equals(end.hash)) throw new Error(`block ${height} doesn't build on block ${height - 1}`);
+    if (first.bits !== end.bits) throw new Error(`blocks ${height - RETARGET_INTERVAL} and ${height - 1} don't share their period's bits`);
+    return { height, timespan: end.time - first.time, oldBits: end.bits, bits: start.bits, expected: nextBits(end.bits, first.time, end.time) };
+  });
 }
 
 const hex = (b: Buffer) => b.toString("hex");
 
 export function audit({ first, last, blocks, raw }: Collected): Report {
   const checks = Object.fromEntries(Object.keys(CHECKS).map((k) => [k, { passed: 0, applies: 0 }])) as Report["checks"];
-  const report: Report = { first, last, transactions: 0, maxWeight: 0, checks, failures: [], retargets: [], subsidy: "0", medianFees: "0" };
+  const report: Report = { first, last, transactions: 0, maxWeight: 0, checks, failures: [], retargets: [], subsidy: "0", medianFees: "0", adjustments: [] };
   const record = (height: number, check: Check, ok: boolean, detail: () => string) => {
     checks[check].applies++;
     if (ok) checks[check].passed++;
@@ -163,7 +217,7 @@ export function audit({ first, last, blocks, raw }: Collected): Report {
   return report;
 }
 
-export const exitCode = (report: Report) => (report.failures.length ? 1 : 0);
+export const exitCode = (report: Report) => (report.failures.length || report.adjustments.some((a) => a.bits !== a.expected) ? 1 : 0);
 
 const number = (n: number) => n.toLocaleString("en-US");
 const btc = (sats: string) => (Number(sats) / 1e8).toLocaleString("en-US", { maximumFractionDigits: 8 });
@@ -176,7 +230,15 @@ export function describe(report: Report): string {
     lines.push(`  check: ${text}: ${number(passed)} of ${number(applies)}${applies < n ? ` (${number(n - applies)} not subject to it)` : ""}`);
     for (const f of report.failures.filter((f) => f.check === name).slice(0, 5)) lines.push(`    block ${number(f.height)}: ${f.detail}`);
   }
-  for (const h of report.retargets) lines.push(`  block ${number(h)} starts a retarget period, so its new bits aren't checked`);
+  const checked = new Set(report.adjustments.map((a) => a.height));
+  for (const h of report.retargets.filter((h) => !checked.has(h))) lines.push(`  block ${number(h)} starts a retarget period, so its new bits aren't checked here; --retarget checks them`);
+  for (const a of report.adjustments) {
+    const days = (s: number) => `${Math.floor(s / 86_400)} days ${Math.floor((s % 86_400) / 3_600)} hours`;
+    const change = Number(target(a.oldBits)) / Number(target(a.bits)) - 1;
+    const difficulty = change !== 0 ? `difficulty ${change > 0 ? "rose" : "fell"} ${Math.abs(change * 100).toFixed(2)}%` : a.bits === 0x1d00ffff ? "difficulty stayed at mainnet's minimum" : "difficulty stayed the same";
+    const verdict = a.bits === a.expected ? "as the formula gives" : `but the formula gives ${a.expected.toString(16)}`;
+    lines.push(`  retarget at block ${number(a.height)}: the period before took ${days(a.timespan)}, against two weeks, so ${difficulty}: bits ${a.bits.toString(16)}, ${verdict}`);
+  }
   lines.push(`  coinbase: ${btc(report.subsidy)} BTC of new coins a block, and a median ${btc(report.medianFees)} BTC claimed in fees`);
   return lines.join("\n");
 }
